@@ -6,7 +6,6 @@
 <meta name="theme-color" content="#F7F9F7"/>
 <title>Мой Планер</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -19,7 +18,7 @@ html,body{height:100%;background:#F7F9F7;color:#111827;font-family:'Onest',syste
   --red:#EF4444;--rdbg:#FEF2F2;--ylw:#F59E0B;--ylbg:#FFFBEB;
   --nav:rgba(255,255,255,0.97);--hdr:rgba(247,249,247,0.97);
 }
-#root{min-height:100vh;padding-bottom:80px}
+#root{min-height:100vh;padding-bottom:calc(80px + env(safe-area-inset-bottom,0px))}
 .hdr{padding:12px 16px 10px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;background:var(--hdr);backdrop-filter:blur(20px);z-index:50;border-bottom:1px solid var(--brd)}
 .hdr-l{display:flex;align-items:center;gap:10px}
 .hdr-l img{width:34px;height:34px;border-radius:10px;object-fit:cover;flex-shrink:0}
@@ -28,7 +27,7 @@ html,body{height:100%;background:#F7F9F7;color:#111827;font-family:'Onest',syste
 .hdr-r{text-align:right}
 .hdr-r .pct{font-size:21px;font-weight:800}
 .hdr-r .plbl{font-size:9px;color:var(--sub)}
-.nav{position:fixed;bottom:0;left:0;right:0;background:var(--nav);backdrop-filter:blur(20px);border-top:1px solid var(--brd);display:flex;justify-content:space-around;padding:8px 0 env(safe-area-inset-bottom,10px);z-index:100}
+.nav{position:fixed;bottom:0;left:0;right:0;background:var(--nav);backdrop-filter:blur(20px);border-top:1px solid var(--brd);display:flex;justify-content:space-around;padding:10px 0 calc(env(safe-area-inset-bottom,0px) + 10px);z-index:100}
 .nb{display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:none;color:var(--sub);cursor:pointer;font-size:8px;font-weight:400;padding:3px 10px;transition:color .2s;font-family:inherit}
 .nb.on{color:var(--gm);font-weight:700}
 .nb .ic{font-size:20px;line-height:1}
@@ -133,8 +132,69 @@ const firstOM=()=>{const d=now();return new Date(d.getFullYear(),d.getMonth(),1)
 const LS_KEYS=['tasks','habits','hh','txns','savings','dream','profile','incCats','expCats','calEvs','cur','isPro','subInfo'];
 const lsGet=k=>{try{return JSON.parse(localStorage.getItem('mp_'+k));}catch{return null;}};
 const lsSave=(k,v)=>{try{localStorage.setItem('mp_'+k,JSON.stringify(v));}catch{}};
-const save=k=>{lsSave(k,S[k]);};
-const saveAll=()=>{LS_KEYS.forEach(k=>save(k));};
+
+// ─── Telegram CloudStorage sync ───
+const TG_CLOUD_KEYS=['tasks','habits','hh','txns','savings','dream','incCats','expCats','calEvs','cur','isPro','subInfo'];
+
+function tgCloudSave(key){
+  if(!tg?.CloudStorage)return;
+  try{tg.CloudStorage.setItem('mp_'+key,JSON.stringify(S[key]),()=>{});}catch{}
+}
+
+function tgCloudSaveAll(){
+  if(!tg?.CloudStorage)return;
+  TG_CLOUD_KEYS.forEach(k=>{
+    try{tg.CloudStorage.setItem('mp_'+k,JSON.stringify(S[k]),()=>{});}catch{}
+  });
+}
+
+function tgCloudLoadAll(cb){
+  if(!tg?.CloudStorage){cb();return;}
+  const cloudKeys=TG_CLOUD_KEYS.map(k=>'mp_'+k);
+  tg.CloudStorage.getItems(cloudKeys,(err,values)=>{
+    if(!err&&values){
+      TG_CLOUD_KEYS.forEach(k=>{
+        try{
+          const v=values['mp_'+k];
+          if(v!=null&&v!==''){const parsed=JSON.parse(v);if(parsed!=null)S[k]=parsed;}
+        }catch{}
+      });
+      // fix date objects
+      ['anPS','anPE','finPS','finPE'].forEach(k=>{if(S[k]&&typeof S[k]==='string')S[k]=new Date(S[k]);});
+      if(!S.anPS||!(S.anPS instanceof Date))S.anPS=firstOM();
+      if(!S.anPE||!(S.anPE instanceof Date))S.anPE=now();
+      if(!S.finPS||!(S.finPS instanceof Date))S.finPS=firstOM();
+      if(!S.finPE||!(S.finPE instanceof Date))S.finPE=now();
+      S.dream=S.dream&&typeof S.dream==='object'?S.dream:{name:'',target:0};
+      S.dream.target=Number(S.dream.target)||0;
+      S.savings=Number(S.savings)||0;
+    }
+    cb();
+  });
+}
+
+// Override save to also write to CloudStorage
+const _origSave=k=>{lsSave(k,S[k]);};
+function save(k){_origSave(k);tgCloudSave(k);}
+function saveAll(){LS_KEYS.forEach(k=>_origSave(k));tgCloudSaveAll();}
+
+// ─── Telegram user profile auto-fill ───
+function applyTgUserProfile(){
+  const user=tg?.initDataUnsafe?.user;
+  if(!user)return;
+  // Always update TG-sourced fields (they come from TG, not editable)
+  S.profile.tgId=user.id;
+  S.profile.tgUsername=user.username||'';
+  S.profile.tgFirstName=user.first_name||'';
+  S.profile.tgLastName=user.last_name||'';
+  // Set display name from TG if not manually set
+  if(!S.profile.nameLocked){
+    S.profile.name=user.first_name+(user.last_name?' '+user.last_name:'');
+  }
+  // Fetch avatar via Telegram getUserProfilePhotos workaround — use photo_url if available (Bot API only)
+  // In WebApp context we use the user's initials as fallback; photo_url is not exposed in initDataUnsafe
+  save('profile');
+}
 
 const haptic=t=>{if(!tg?.HapticFeedback)return;try{if(['light','medium','heavy'].includes(t))tg.HapticFeedback.impactOccurred(t);else if(['success','warning','error'].includes(t))tg.HapticFeedback.notificationOccurred(t);}catch{}};
 const openLink=u=>{if(tg?.openTelegramLink)tg.openTelegramLink(u);else window.open(u,'_blank');};
@@ -152,20 +212,6 @@ let S={
   finSub:'add',txType:'expense',txCat:'',txText:'',txAmt:'',txDate:TODAY,
   anPS:firstOM(),anPE:now(),finPS:firstOM(),finPE:now(),
 };
-
-// ─── load from storage ───
-LS_KEYS.forEach(k=>{const v=lsGet(k);if(v!=null)S[k]=v;});
-// fix date objects after JSON parse
-['anPS','anPE','finPS','finPE'].forEach(k=>{if(S[k]&&typeof S[k]==='string')S[k]=new Date(S[k]);});
-if(!S.anPS||!(S.anPS instanceof Date))S.anPS=firstOM();
-if(!S.anPE||!(S.anPE instanceof Date))S.anPE=now();
-if(!S.finPS||!(S.finPS instanceof Date))S.finPS=firstOM();
-if(!S.finPE||!(S.finPE instanceof Date))S.finPE=now();
-if(!S.txDate)S.txDate=TODAY;
-if(!S.dream||typeof S.dream!=='object')S.dream={name:'',target:0};
-S.dream.target=Number(S.dream.target)||0;
-S.savings=Number(S.savings)||0;
-if(tg?.initDataUnsafe?.user&&!S.profile.name)S.profile.name=tg.initDataUnsafe.user.first_name||'';
 
 // ─── dom helpers ───
 const CE=(tag,cls,html)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e;};
@@ -878,10 +924,15 @@ function mkProfile(){
 
   // Profile card
   const pc=D('card');
+  const tgUser=tg?.initDataUnsafe?.user;
   const piRow=D('');piRow.style.cssText='display:flex;align-items:center;gap:14px;margin-bottom:16px';
   const avaWrap=D('');avaWrap.style.cssText='position:relative;flex-shrink:0';
-  const ava=D('');ava.style.cssText='width:64px;height:64px;border-radius:20px;background:'+(S.profile.avatar?`url(${S.profile.avatar}) center/cover`:`linear-gradient(135deg,${G},${GM})`)+';background-size:cover;display:flex;align-items:center;justify-content:center;font-size:24px;cursor:pointer;color:#fff;font-weight:800';
-  if(!S.profile.avatar)ava.textContent=S.profile.name?.[0]?.toUpperCase()||'👤';
+  // Determine avatar: TG photo_url (not available in WebApp), localStorage avatar, or initials
+  const avaUrl=S.profile.avatar||'';
+  const displayName=S.profile.tgFirstName||(S.profile.name||'');
+  const initials=(displayName[0]||'👤').toUpperCase();
+  const ava=D('');ava.style.cssText='width:64px;height:64px;border-radius:20px;background:'+(avaUrl?`url(${avaUrl}) center/cover`:`linear-gradient(135deg,${G},${GM})`)+';background-size:cover;display:flex;align-items:center;justify-content:center;font-size:24px;cursor:pointer;color:#fff;font-weight:800';
+  if(!avaUrl)ava.textContent=initials;
   const fi=document.createElement('input');fi.type='file';fi.accept='image/*';fi.style.display='none';
   fi.onchange=e=>{const f=e.target.files?.[0];if(!f)return;if(f.size>2*1024*1024){alert('Макс 2MB');return;}const rd=new FileReader();rd.onloadend=()=>{S.profile.avatar=rd.result;save('profile');render();};rd.readAsDataURL(f);};
   ava.onclick=()=>fi.click();
@@ -889,10 +940,28 @@ function mkProfile(){
   const camBadge=D('');camBadge.style.cssText='position:absolute;bottom:-2px;right:-2px;width:22px;height:22px;border-radius:50%;background:var(--g);display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff';camBadge.textContent='📷';
   avaWrap.appendChild(camBadge);
   const pi2=D('');pi2.style.flex='1';
-  const nameInp=document.createElement('input');nameInp.className='inp';nameInp.value=S.profile.name||'';nameInp.placeholder='Ваше имя';nameInp.style.cssText='font-size:16px;font-weight:700;margin-bottom:6px';
-  nameInp.oninput=e=>S.profile.name=e.target.value;
-  nameInp.onblur=()=>save('profile');
-  pi2.appendChild(nameInp);pi2.innerHTML+='<div style="font-size:12px;color:var(--sub)">Ник изменить нельзя</div>';
+  // Show TG name as read-only if connected, otherwise show editable input
+  if(tgUser){
+    const tgName=document.createElement('div');
+    const fullName=(S.profile.tgFirstName||'')+(S.profile.tgLastName?' '+S.profile.tgLastName:'');
+    tgName.style.cssText='font-size:16px;font-weight:700;margin-bottom:4px;color:var(--txt)';
+    tgName.textContent=fullName||S.profile.name||'—';
+    pi2.appendChild(tgName);
+    if(S.profile.tgUsername){
+      const usernameDiv=D('');usernameDiv.style.cssText='font-size:13px;color:var(--g);font-weight:600;margin-bottom:4px';
+      usernameDiv.textContent='@'+S.profile.tgUsername;
+      pi2.appendChild(usernameDiv);
+    }
+    const tgBadge=D('');tgBadge.style.cssText='display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#2563EB;background:rgba(37,99,235,.08);padding:3px 8px;border-radius:8px';
+    tgBadge.innerHTML='✈️ Синхронизировано с Telegram';
+    pi2.appendChild(tgBadge);
+  }else{
+    const nameInp=document.createElement('input');nameInp.className='inp';nameInp.value=S.profile.name||'';nameInp.placeholder='Ваше имя';nameInp.style.cssText='font-size:16px;font-weight:700;margin-bottom:6px';
+    nameInp.oninput=e=>{S.profile.name=e.target.value;S.profile.nameLocked=true;};
+    nameInp.onblur=()=>save('profile');
+    pi2.appendChild(nameInp);
+    pi2.innerHTML+='<div style="font-size:12px;color:var(--sub)">Откройте в Telegram для синхронизации</div>';
+  }
   piRow.appendChild(avaWrap);piRow.appendChild(pi2);pc.appendChild(piRow);
   pc.innerHTML+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div style="background:var(--gbg);border-radius:12px;padding:12px;text-align:center"><div style="font-size:22px;font-weight:800;color:${GM}">${avgP}%</div><div style="font-size:10px;color:var(--sub);margin-top:2px;font-weight:500">Средний прогресс</div></div><div style="background:var(--gbg);border-radius:12px;padding:12px;text-align:center"><div style="font-size:22px;font-weight:800;color:${GM}">${fmtN(effSav)}</div><div style="font-size:10px;color:var(--sub);margin-top:2px;font-weight:500">Накоплено ${sym}</div></div></div>`;
   wrap.appendChild(pc);
@@ -1323,7 +1392,29 @@ function getStreak(id){let s=0;const d=new Date(now());while(S.hh[toKey(d)]?.[id
 
 // ══════════════ INIT ══════════════
 if(tg){tg.ready();tg.expand();}
-render();
+// Load from localStorage first (instant), then sync from TG CloudStorage
+LS_KEYS.forEach(k=>{const v=lsGet(k);if(v!=null)S[k]=v;});
+['anPS','anPE','finPS','finPE'].forEach(k=>{if(S[k]&&typeof S[k]==='string')S[k]=new Date(S[k]);});
+if(!S.anPS||!(S.anPS instanceof Date))S.anPS=firstOM();
+if(!S.anPE||!(S.anPE instanceof Date))S.anPE=now();
+if(!S.finPS||!(S.finPS instanceof Date))S.finPS=firstOM();
+if(!S.finPE||!(S.finPE instanceof Date))S.finPE=now();
+if(!S.txDate)S.txDate=TODAY;
+if(!S.dream||typeof S.dream!=='object')S.dream={name:'',target:0};
+S.dream.target=Number(S.dream.target)||0;
+S.savings=Number(S.savings)||0;
+
+applyTgUserProfile();
+render(); // render immediately from localStorage
+
+// Then load from CloudStorage (sync across devices) and re-render if data differs
+tgCloudLoadAll(()=>{
+  applyTgUserProfile();
+  // also sync localStorage from cloud result
+  LS_KEYS.forEach(k=>lsSave(k,S[k]));
+  render();
+});
+
 // Save all state on page hide (important for data persistence)
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveAll();});
 window.addEventListener('pagehide',saveAll);
